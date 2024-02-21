@@ -1,2 +1,2 @@
 # chance-and-choice
-You AI dungeon master awaits! 
+Your AI dungeon master awaits! 
