@@ -1,58 +1,66 @@
+import asyncio
+import aioconsole
+import openai
 from dotenv import load_dotenv
 import os
-import openai
 import pygame
-from pathlib import Path
 import tempfile
 
-# Initialize Pygame Mixer
+# Initialize Pygame Mixer for MP3 playback
 pygame.mixer.init()
 
-# Load environment variables
+# Load environment variables and configure the OpenAI API key
 load_dotenv()
-
-# Configure your OpenAI API key
 openai.api_key = os.getenv('OPENAI_API_KEY')
 
-def play_audio_from_file(audio_file_path):
-    wave_obj = sa.WaveObject.from_wave_file(audio_file_path)
-    play_obj = wave_obj.play()
-    play_obj.wait_done()  # Wait until audio file finishes playing
-
-def play_mp3(audio_file_path):
-    # Load and play an MP3 audio file
+async def play_mp3(audio_file_path):
+    """Asynchronously play an MP3 audio file without blocking."""
     pygame.mixer.music.load(audio_file_path)
     pygame.mixer.music.play()
-    # Wait for the music to play before proceeding
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
+    # No waiting/blocking here, allowing other tasks to run concurrently
 
-def generate_and_play_response(user_input):
-    # Assuming 'openai.audio.speech.create' and 'openai.ChatCompletion.create' are hypothetical functions
-    # based on OpenAI's capabilities. Adjust according to the actual API functions and parameters.
-    prompt_response = openai.chat.completions.create(
-        model="gpt-4",
-        messages=[{"role": "system", "content": "You are the dungeon master. The adventure begins!"},
-                  {"role": "user", "content": user_input}]
-    )
-
-    response_text = prompt_response.choices[0].message.content
-    print("AI is generating a response...")
-
-    # Generate speech from response text
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmpfile:
+async def generate_audio_and_image(response_text):
+    """Generate audio from the response text and play it, while also generating an image."""
+    # Generate speech from response text and play it immediately
+    with tempfile.NamedTemporaryFile(delete=True, suffix='.mp3') as tmpfile:
         prompt_speech_response = openai.audio.speech.create(
             model="tts-1",
             voice="fable",
             input=response_text
         )
         prompt_speech_response.write_to_file(tmpfile.name)
-        # Play the audio file
-        play_mp3(tmpfile.name)
+        await play_mp3(tmpfile.name)
 
-# Main game loop
-while True:
-    user_input = input("Your action (type 'quit' to exit): ")
-    if user_input.lower() == 'quit':
-        break
-    generate_and_play_response(user_input)
+    # Generate an image based on the response text
+    hook_image_response = openai.images.generate(
+        model="dall-e-3",
+        prompt=response_text,
+        n=1,
+        size="1024x1024"
+    )
+    image_url = hook_image_response.data[0].url
+    print('Scene URL:', image_url)
+
+async def generate_and_play_response(user_input):
+    """Generate a response based on user input, then concurrently play audio and generate an image."""
+    prompt_response = openai.chat.completions.create(
+        model="gpt-4",
+        messages=[{"role": "system", "content": "You are the dungeon master. The adventure begins!"},
+                  {"role": "user", "content": user_input}]
+    )
+    response_text = prompt_response.choices[0].message.content
+    print("AI is generating a response...")
+
+    # Concurrently generate and play audio, and generate an image
+    await generate_audio_and_image(response_text)
+
+async def main_game_loop():
+    """Main game loop for asynchronously handling user actions."""
+    while True:
+        user_input = await aioconsole.ainput("Your action (type 'quit' to exit): ")
+        if user_input.lower() == 'quit':
+            break
+        await generate_and_play_response(user_input)
+
+if __name__ == "__main__":
+    asyncio.run(main_game_loop())
