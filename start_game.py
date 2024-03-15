@@ -108,8 +108,6 @@ class EventHandler(AssistantEventHandler):
         self.audio_queue.put_nowait(self.text_buffer)
         self.text_buffer = ""
 
-    # print(delta.value, end="", flush=True)
-
   async def audio_playback_worker(self):
     while True:      
         try:  
