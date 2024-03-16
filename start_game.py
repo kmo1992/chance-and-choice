@@ -8,7 +8,7 @@ import aioconsole
 from dotenv import load_dotenv
 import openai
 import pygame
-from config import (ASSISTANT_MODEL, AUDIO_MODEL, AUDIO_VOICE, IMAGE_MODEL, IMAGE_SIZE, INSTRUCTIONS_FILE_PATH)
+from config import (ASSISTANT_MODEL, AUDIO_MODEL, AUDIO_VOICE, IMAGE_MODEL, IMAGE_SIZE, CHARACTER_DELAY, INSTRUCTIONS_FILE_PATH)
 from typing_extensions import override
 from openai import AssistantEventHandler
 
@@ -45,11 +45,11 @@ async def play_mp3(audio_file_path):
     except Exception as e:
         print(f"Error playing audio: {e}")
 
-async def type_out_text(sentence):
+async def type_text(text):
     """Simulate typing out text one character at a time."""
-    for char in sentence:
+    for char in text:
         print(char, end='', flush=True)  # Print characters without newline, flushing output immediately.
-        await asyncio.sleep(0.05)  # Adjust delay to match desired typing speed.
+        await asyncio.sleep(CHARACTER_DELAY)  # Adjust delay to match desired typing speed.
 
 async def generate_and_play_audio(response_text):
     """Generate audio from the response text and play it."""
@@ -62,11 +62,13 @@ async def generate_and_play_audio(response_text):
             ) as response:
                 response.stream_to_file(tmpfile.name)
 
-            # Print the sentence just before starting the audio playback
-            print(response_text, end="", flush=True)
-            
-            # Start audio playback
-            await play_mp3(tmpfile.name)
+            # Create tasks for typing out text and playing audio
+            typing_task = asyncio.create_task(type_text(response_text))
+            play_audio_task = asyncio.create_task(play_mp3(tmpfile.name))
+
+            # Wait for both tasks to complete
+            await typing_task
+            await play_audio_task
     except Exception as e:
         print(f"Error generating or playing audio: {e}")
 
@@ -102,11 +104,16 @@ class EventHandler(AssistantEventHandler):
     # Accumulate text in the buffer
     self.text_buffer += delta.value
 
-    # Check if the buffer ends with a sentence terminator (period, question mark, or exclamation mark)
-    if self.text_buffer.strip().endswith(('.', '?', '!')):
-        # Enqueue the text for audio playback
-        self.audio_queue.put_nowait(self.text_buffer)
-        self.text_buffer = ""
+    # Process complete paragraphs
+    while '\n\n' in self.text_buffer:
+        # Find the first paragraph break
+        break_index = self.text_buffer.index('\n\n') + 2
+        # Extract the paragraph
+        paragraph = self.text_buffer[:break_index]
+        # Process the paragraph
+        self.audio_queue.put_nowait(paragraph)
+        # Remove the processed paragraph from the buffer
+        self.text_buffer = self.text_buffer[break_index:]
 
   async def audio_playback_worker(self):
     while True:      
@@ -118,7 +125,13 @@ class EventHandler(AssistantEventHandler):
             await asyncio.sleep(0.1)
         except Exception as e:
             print(f"Error in audio playback worker: {e}")
-      
+            
+  def end_of_stream(self):
+    # Handle any remaining data in the buffer as the last paragraph
+    if self.text_buffer.strip():
+        self.audio_queue.put_nowait(self.text_buffer)
+        self.text_buffer = ""  # Clear the buffer
+
   def on_tool_call_created(self, tool_call):
     print(f"\nassistant > {tool_call.type}\n", flush=True)
   
@@ -153,6 +166,8 @@ async def generate_and_play_response(user_input):
             event_handler=event_handler,
         ) as stream:
             stream.until_done()
+        
+        event_handler.end_of_stream()
 
         # Retrieve all the messages added after our last user message
         messages = openai.beta.threads.messages.list(
@@ -186,7 +201,7 @@ async def main_game_loop():
     """Main game loop for asynchronously handling user actions."""
 
     while True:
-        user_input = await aioconsole.ainput("\nuser (type 'quit' to exit) > ")
+        user_input = await aioconsole.ainput("\n\nuser (type 'quit' to exit) > ")
         if user_input.lower() == 'quit':
             break
         await generate_and_play_response(user_input)    
