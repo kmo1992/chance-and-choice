@@ -9,3 +9,6 @@ IMAGE_SIZE = "1024x1024"
 
 # File paths
 INSTRUCTIONS_FILE_PATH = 'instructions.md'
+
+# Output settings
+CHARACTER_DELAY = 0.05

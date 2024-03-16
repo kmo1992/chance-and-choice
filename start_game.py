@@ -1,27 +1,29 @@
-# main.py
+# start_game.py
 
 import asyncio
 import os
 import tempfile
-
+from typing import override
 import aioconsole
 from dotenv import load_dotenv
 import openai
 import pygame
-from config import (ASSISTANT_MODEL, AUDIO_MODEL, AUDIO_VOICE, IMAGE_MODEL, IMAGE_SIZE, INSTRUCTIONS_FILE_PATH)
+from config import (
+    ASSISTANT_MODEL, AUDIO_MODEL, AUDIO_VOICE, CHARACTER_DELAY, INSTRUCTIONS_FILE_PATH
+)
 
-# Load environment variables and configure the OpenAI API key
+# Load environment variables and set the OpenAI API key
 load_dotenv()
 openai.api_key = os.getenv('OPENAI_API_KEY')
 
-# Initialize Pygame Mixer for MP3 playback
+# Initialize Pygame Mixer for audio playback
 pygame.mixer.init()
 
-# Load instructions from a file
 def load_instructions(file_path):
+    """Load instructions from a specified file path."""
     with open(file_path, 'r', encoding='utf-8') as file:
         return file.read()
-    
+
 instructions = load_instructions(INSTRUCTIONS_FILE_PATH)
 
 assistant = openai.beta.assistants.create(
@@ -34,105 +36,135 @@ assistant = openai.beta.assistants.create(
 thread = openai.beta.threads.create()
 
 async def play_mp3(audio_file_path):
-    """Asynchronously play an MP3 audio file without blocking."""
+    """Play an MP3 audio file asynchronously."""
     try:
         pygame.mixer.music.load(audio_file_path)
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
-            await asyncio.sleep(1)  # Check every second if the audio is still playing
+            await asyncio.sleep(1)
     except Exception as e:
         print(f"Error playing audio: {e}")
 
+async def type_text(text):
+    """Simulate typing out text one character at a time, based on a configured delay."""
+    for char in text:
+        print(char, end='', flush=True)
+        await asyncio.sleep(CHARACTER_DELAY)
+
 async def generate_and_play_audio(response_text):
-    """Generate audio from the response text and play it."""
+    """Generate audio from response text, simulate typing, and play the audio."""
     try:
         with tempfile.NamedTemporaryFile(delete=True, suffix='.mp3') as tmpfile:
-            prompt_speech_response = openai.audio.speech.create(
+            with openai.audio.speech.with_streaming_response.create(
                 model=AUDIO_MODEL,
                 voice=AUDIO_VOICE,
                 input=response_text
-            )
-            # Assuming 'write_to_file' is a method that writes the audio to a file
-            prompt_speech_response.write_to_file(tmpfile.name)
-            await play_mp3(tmpfile.name)
+            )as response:
+                response.stream_to_file(tmpfile.name)
+
+            typing_task = asyncio.create_task(type_text(response_text))
+            play_audio_task = asyncio.create_task(play_mp3(tmpfile.name))
+
+            await typing_task
+            await play_audio_task
     except Exception as e:
         print(f"Error generating or playing audio: {e}")
 
-async def generate_and_display_image(response_text):
-    """Generate an image based on the response text and display its URL."""
-    try:
-        hook_image_response = openai.images.generate(
-            model=IMAGE_MODEL,
-            prompt=response_text,
-            n=1,
-            size=IMAGE_SIZE
-        )
-        image_url = hook_image_response.data[0].url
-        print(f'Scene URL: {image_url}\n')
-    except Exception as e:
-        print(f"Error generating image: {e}")
+class EventHandler(openai.AssistantEventHandler):
+    """Custom event handler to process and queue text for audio playback."""
+    def __init__(self):
+        super().__init__()
+        self.text_buffer = ""
+        self.audio_queue = asyncio.Queue()
 
-async def wait_on_run(run, thread):
-    while run.status == "queued" or run.status == "in_progress":
-        run = openai.beta.threads.runs.retrieve(
-            thread_id=thread.id,
-            run_id=run.id,
-        )
-        await asyncio.sleep(0.25)
-    return run
+    @override
+    def on_text_created(self, text) -> None:
+        print(f"\nassistant > ", end="", flush=True)
 
-async def generate_and_play_response(user_input):
-    """Generate a response based on user input, then concurrently play audio and generate an image."""
-    try:
-        message = openai.beta.threads.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=user_input
-        )
+    @override
+    def on_text_delta(self, delta, snapshot):
+        """Accumulate text deltas and queue complete paragraphs for audio playback."""
+        self.text_buffer += delta.value
 
-        run = openai.beta.threads.runs.create(
-            thread_id=thread.id,
-            assistant_id=assistant.id
-        )
+        while '\n\n' in self.text_buffer:
+            break_index = self.text_buffer.index('\n\n') + 2
+            paragraph = self.text_buffer[:break_index]
+            self.audio_queue.put_nowait(paragraph)
+            self.text_buffer = self.text_buffer[break_index:]
 
-        print("AI is generating a response...\n")
+    async def audio_playback_worker(self):
+        """Process queued text for audio playback in a background task."""
+        while True:
+            text_to_speak = await self.audio_queue.get()
+            await generate_and_play_audio(text_to_speak)
+            self.audio_queue.task_done()
 
-        run = await wait_on_run(run, thread)
+    def end_of_stream(self):
+        """Queue any remaining text in the buffer for playback at stream end."""
+        if self.text_buffer.strip():
+            self.audio_queue.put_nowait(self.text_buffer)
+            self.text_buffer = ""
 
-        # Retrieve all the messages added after our last user message
-        messages = openai.beta.threads.messages.list(
-            thread_id=thread.id, order="asc", after=message.id
-        )
+    def on_tool_call_created(self, tool_call):
+        print(f"\nassistant > {tool_call.type}\n", flush=True)
 
-        # Concatenate all messages where role == "assistant"
-        concatenated_messages = " ".join(
-            message.content[0].text.value
-            for message in messages.data
-            if message.role == "assistant"
-        )
-
-        # Log the response for the user to see
-        print(concatenated_messages + "\n")
-
-        # Create tasks for audio and image generation to run concurrently
-        audio_task = asyncio.create_task(generate_and_play_audio(concatenated_messages))
-        image_task = asyncio.create_task(generate_and_display_image(concatenated_messages))
-
-        # Wait for the image task to complete first to ensure its output is handled as soon as it's ready
-        await image_task
-        # Then wait for the audio task, ensuring it also completes
-        await audio_task
-    except Exception as e:
-        print(f"Error in generating and playing response: {e}")
+    def on_tool_call_delta(self, delta, snapshot):
+        if delta.type == 'code_interpreter':
+            if delta.code_interpreter.input:
+                print(delta.code_interpreter.input, end="", flush=True)
+            if delta.code_interpreter.outputs:
+                print(f"\n\noutput >", flush=True)
+            if delta.code_interpreter.outputs is not None:
+                for output in delta.code_interpreter.outputs:
+                    if output.type == "logs":
+                        print(f"\n{output.logs}", flush=True)
 
 async def main_game_loop():
-    """Main game loop for asynchronously handling user actions."""
-
+    """Main game loop to handle user input and generate responses."""
+    
     while True:
-        user_input = await aioconsole.ainput("Your action (type 'quit' to exit): ")
+        user_input = await aioconsole.ainput("\n\nuser (type 'quit' to exit) > ")
         if user_input.lower() == 'quit':
             break
-        await generate_and_play_response(user_input)
+
+        event_handler = EventHandler()
+        worker_task = asyncio.create_task(event_handler.audio_playback_worker())
+
+        try:
+            message = openai.beta.threads.messages.create(
+                thread_id=thread.id,
+                role="user",
+                content=user_input
+            )
+
+            with openai.beta.threads.runs.create_and_stream(
+                thread_id=thread.id,
+                assistant_id=assistant.id,
+                event_handler=event_handler,
+            ) as stream:
+                stream.until_done()
+
+            event_handler.end_of_stream()
+
+            # Retrieve all the messages added after our last user message
+            messages = openai.beta.threads.messages.list(
+                thread_id=thread.id, order="asc", after=message.id
+            )
+
+            # Concatenate all messages where role == "assistant"
+            concatenated_messages = " ".join(
+                message.content[0].text.value
+                for message in messages.data
+                if message.role == "assistant"
+            )
+
+            await event_handler.audio_queue.join()  # Ensure all audio has been played
+        finally:
+            worker_task.cancel()
+            try:
+                await worker_task  # Ensure the task is cancelled properly
+            except asyncio.CancelledError:
+                pass  # Expected upon cancellation
 
 if __name__ == "__main__":
     asyncio.run(main_game_loop())
