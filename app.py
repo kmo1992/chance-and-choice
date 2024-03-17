@@ -5,12 +5,15 @@ import os
 import threading
 import queue
 from typing import override
+import tempfile
 from config import (
     ASSISTANT_MODEL, AUDIO_MODEL, AUDIO_VOICE, CHARACTER_DELAY, INSTRUCTIONS_FILE_PATH
 )
 
 # OpenAI: API key
 load_dotenv()
+
+server_name = os.getenv("SERVER_NAME", "127.0.0.1")
 openai.key = os.getenv('OPENAI_API_KEY')
 
 # Load instructions from a file
@@ -67,7 +70,10 @@ def openai_streaming_thread(thread_id, assistant_id, event_handler):
     # Start the streaming in a new thread
     threading.Thread(target=stream).start()
 
-def generate_responses(message, history):
+def user(user_message, history):
+    return "", history + [[user_message, None]]
+
+def generate_responses(history):
     """
     This function is called by Gradio and yields responses as they are received.
     """
@@ -75,7 +81,7 @@ def generate_responses(message, history):
     openai.beta.threads.messages.create(
         thread_id=thread.id,
         role="user",
-        content=message,
+        content=history[-1][0],
         )
 
     # Start the OpenAI stream in a separate thread
@@ -88,6 +94,38 @@ def generate_responses(message, history):
             text = data_queue.get()
             accumulated_response += text
         else:
-            yield accumulated_response
+            history[-1][1] = accumulated_response
+            yield history, None
 
-gr.ChatInterface(generate_responses).launch()
+    response = openai.audio.speech.create(
+        model=AUDIO_MODEL,
+        voice=AUDIO_VOICE,
+        input=accumulated_response
+    )
+    
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as temp_file:
+            temp_file.write(response.content)
+            
+    yield history, temp_file.name
+
+with gr.Blocks() as demo:
+    with gr.Row():
+        gr.Markdown(
+            "### Welcome to the game! You can interact with the Dungeon Master by typing your messages in the text box and then clicking on the \"Submit\" button. The Dungeon Master will respond to your messages and you will hear the responses as audio. Enjoy the game!"
+        )
+    with gr.Row():
+        with gr.Column():    
+            msg = gr.Textbox(
+                label="Player",
+                placeholder="Enter your text and then click on the \"Submit\" button or simply press the Enter key.")
+            btn = gr.Button("Submit")
+        with gr.Column():
+            chatbot = gr.Chatbot(label="Dungeon Master")
+            audio = gr.Audio(label="Speech", interactive=False, autoplay=True)
+   
+    msg.submit(fn=user, inputs=[msg, chatbot], outputs=[msg, chatbot], queue=False).then(
+        generate_responses, inputs=[chatbot], outputs=[chatbot, audio])
+    btn.click(fn=user, inputs=[msg, chatbot], outputs=[msg, chatbot], queue=False).then(
+        generate_responses, inputs=[chatbot], outputs=[chatbot, audio])
+
+demo.launch(server_name=server_name)
